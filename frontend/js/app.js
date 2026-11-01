@@ -1,5 +1,5 @@
 // ===== 配置 =====
-const API_BASE = ""; // 部署时在 Cloudflare 控制台填入 Worker URL，见 README // Cloudflare Worker 部署后替换为实际地址
+const API_BASE = "https://cantingshi-api.906143430.workers.dev";
 const API_KEY_PLACEHOLDER = 'YOUR_QWEN_API_KEY';
 
 // ===== 状态 =====
@@ -413,4 +413,5 @@ $('share-img').addEventListener('click', () => {
   link.href = $('share-canvas').toDataURL('image/png');
   link.click();
 });
+
 

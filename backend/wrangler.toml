@@ -1,8 +1,5 @@
-name = "food-aesthetics"
+name = "cantingshi-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
-
-[vars]
-# 生产环境通过 Cloudflare 控制台环境变量配置 AGNES_API_KEY
-# 本地测试可以在这里填写（不推荐提交到git）
-# AGNES_API_KEY = "your-agnes-api-key-here"
+workers_dev = true
+route = "cantingshi-api.workers.dev/*"
