@@ -1,6 +1,9 @@
 // ===== 配置 =====
 const API_BASE = "https://cantingshi-api.906143430.workers.dev";
-const API_KEY_PLACEHOLDER = 'YOUR_QWEN_API_KEY';
+
+// 上传前压缩：长边最大 1024px，输出 JPEG，避免 base64 过大 / 格式兼容问题
+const MAX_SIDE = 1024;
+const JPEG_QUALITY = 0.85;
 
 // ===== 状态 =====
 let currentImageBase64 = '';
@@ -17,14 +20,42 @@ function showPage(pageId) {
 }
 
 // ===== 图片处理 =====
-function handleFile(file) {
+// 读文件 -> 等比缩放 -> 输出 JPEG data URL
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * scale));
+      const h = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      // 白底，避免 PNG 透明区域转 JPEG 后变黑
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', JPEG_QUALITY));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('图片读取失败，请换一张试试'));
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function handleFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    currentImageBase64 = e.target.result;
+  try {
+    currentImageBase64 = await fileToDataUrl(file);
     showPreview(currentImageBase64);
-  };
-  reader.readAsDataURL(file);
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 function showPreview(src) {
@@ -110,21 +141,20 @@ function stopLoading() {
 
 // ===== 调用API =====
 async function callAPI(imageBase64) {
-  // remove data URL prefix
-  const b64Data = imageBase64.split(',')[1];
-  // infer MIME type
-  const mimeMatch = imageBase64.match(/^data:(image\/[^;]+);base64,/);
-  const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
-  const dataUrl = "data:" + mimeType + ";base64," + b64Data;
-  
   const resp = await fetch(API_BASE + '/evaluate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: dataUrl })
+    body: JSON.stringify({ image: imageBase64 })
   });
-  
-  if (!resp.ok) throw new Error('请求失败');
-  return await resp.json();
+
+  let payload = null;
+  try { payload = await resp.json(); } catch { /* 非 JSON 响应 */ }
+
+  if (!resp.ok || !payload || payload.error) {
+    const detail = (payload && (payload.error || payload.upstream)) || ('HTTP ' + resp.status);
+    throw new Error(detail);
+  }
+  return payload;
 }
 
 // ===== 提交分析 =====
@@ -147,7 +177,12 @@ $('analyze-btn').addEventListener('click', async () => {
     }
   } catch (err) {
     stopLoading();
-    alert('评测出错：' + err.message + '\n\n请检查后端 API 是否正常运行，以及 Qwen API Key 是否正确配置。');
+    const msg = err && err.message ? err.message : '未知错误';
+    const isNetwork = /Failed to fetch|NetworkError|Load failed/i.test(msg);
+    alert('评测失败：' + msg + '\n\n' +
+      (isNetwork
+        ? '请检查网络或后端服务是否正常。'
+        : '若反复出现，请检查后端 AI Key 配置与账户额度（限流/额度用尽会返回 429）。'));
     showPage('page-upload');
   }
 });
@@ -171,16 +206,23 @@ function renderResult(data) {
   // 故事
   $('story-text').textContent = data.story || '这是一道充满生活气息的家常美味';
   
-  // 六个维度
-  const dims = ['color', 'composition', 'texture', 'appetite', 'story'];
-  dims.forEach(dim => {
-    const val = (data[dim] || 6) * 10; // 1-10 scale -> percentage
-    const bar = $('bar-' + dim);
-    const scoreEl = $('score-' + dim);
+  // 五个维度（story 是文案、story_score 是分数）
+  const dims = [
+    { dom: 'color', field: 'color' },
+    { dom: 'composition', field: 'composition' },
+    { dom: 'texture', field: 'texture' },
+    { dom: 'appetite', field: 'appetite' },
+    { dom: 'story', field: 'story_score' }
+  ];
+  dims.forEach(({ dom, field }) => {
+    const scoreNum = Number(data[field]);
+    const safeScore = Number.isFinite(scoreNum) ? scoreNum : 6;
+    const bar = $('bar-' + dom);
+    const scoreEl = $('score-' + dom);
     setTimeout(() => {
-      bar.style.width = Math.min(val, 100) + '%';
+      bar.style.width = Math.min(safeScore * 10, 100) + '%';
     }, 200);
-    scoreEl.textContent = (data[dim] || 6).toFixed(1);
+    scoreEl.textContent = safeScore.toFixed(1);
   });
   
   // 建议
@@ -311,12 +353,14 @@ function drawPosterContent(ctx, W, H, data, score) {
     { name: '构图美感', key: 'composition', emoji: '📐' },
     { name: '质感对比', key: 'texture', emoji: '✨' },
     { name: '食欲指数', key: 'appetite', emoji: '🔥' },
-    { name: '餐桌故事', key: 'story', emoji: '📖' }
+    { name: '餐桌故事', key: 'story_score', emoji: '📖' }
   ];
   
   let yPos = 830;
   dims.forEach(dim => {
-    const val = ((data[dim.key] || 6) / 10 * 100).toFixed(0);
+    const rawScore = Number(data[dim.key]);
+    const safeScore = Number.isFinite(rawScore) ? rawScore : 6;
+    const val = Math.round(safeScore / 10 * 100).toString();
     ctx.fillStyle = '#2c1810';
     ctx.font = '22px "Noto Sans SC", sans-serif';
     ctx.textAlign = 'left';
@@ -392,23 +436,26 @@ $('copy-btn').addEventListener('click', () => {
   const score = currentResult?.overall_score || 65;
   const persona = currentResult?.persona_label || '佛系干饭派';
   const siteUrl = 'https://writtyflame.github.io/food-aesthetics/';
-  const customText = currentResult?.share_text;
-  const hasCustomText = customText && customText !== '快来测测你的餐桌人格！' && customText !== 'AI给我的晚餐打了' + (currentResult?.overall_score || 0) + '分';
-  const text = hasCustomText
-    ? customText + '\n\n' + siteUrl
-    : '🍽 AI给我的晚餐打了' + score + '分，说我是一个「' + persona + '」食客～\n' + siteUrl + ' 来测测你的餐桌人格！';navigator.clipboard.writeText(text).then(() => {
+  const customText = (currentResult?.share_text || '').trim();
+  const isDefaultText = !customText || customText === '快来测测你的餐桌人格！';
+  const text = (isDefaultText
+    ? '🍽 AI给我的晚餐打了' + score + '分，说我是一个「' + persona + '」食客～'
+    : customText) + '\n\n' + siteUrl;
+
+  const done = () => {
     $('copy-btn').textContent = '✅ 已复制';
     setTimeout(() => { $('copy-btn').textContent = '复制文字'; }, 2000);
-  }).catch(() => {
-    // fallback
+  };
+
+  navigator.clipboard.writeText(text).then(done).catch(() => {
+    // 非 HTTPS / 无权限时的兜底
     const ta = document.createElement('textarea');
     ta.value = text;
     document.body.appendChild(ta);
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
-    $('copy-btn').textContent = '✅ 已复制';
-    setTimeout(() => { $('copy-btn').textContent = '复制文字'; }, 2000);
+    done();
   });
 });
 

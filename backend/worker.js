@@ -16,6 +16,7 @@ const EVALUATION_PROMPT = `你是一位专业的美食美学分析师，擅长�
   "composition": 8.0,
   "texture": 6.5,
   "appetite": 8.5,
+  "story_score": 7.5,
   "story": "这道菜传递了家庭聚餐的温暖氛围，像周末下午的阳光一样舒服",
   "overall_score": 78,
   "persona_label": "暖心治愈派",
@@ -32,7 +33,7 @@ const EVALUATION_PROMPT = `你是一位专业的美食美学分析师，擅长�
 - 构图：菜品在画面中的布局是否有美感  
 - 质感：不同食材质感的呈现是否丰富
 - 食欲：看了是否让人产生想吃欲望
-- 故事感：菜品传递的氛围和情绪
+- 故事感：菜品传递的氛围和情绪（story_score 是分数，story 是文字描述）
 - 整体：综合以上维度加权打分
 
 人格标签（选一个最贴切的）：
@@ -40,71 +41,117 @@ const EVALUATION_PROMPT = `你是一位专业的美食美学分析师，擅长�
 
 注意：对任何菜品都要找到亮点，给予鼓励性评价。`
 
+const AGNES_ENDPOINT = 'https://apihub.agnes-ai.com/v1/chat/completions'
+const AGNES_MODEL = 'agnes-2.5-flash'
+
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+  status,
+  headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+})
+
+/**
+ * 规范化前端传来的图片数据
+ * 兼容：data URL / 纯 base64 / URL-safe base64 / 被 URL 编码过的 base64 / 带换行的 base64
+ */
+function normalizeImage(input) {
+  if (typeof input !== 'string' || !input.trim()) return null
+
+  let s = input.trim()
+  // 被 URL 编码过的（%2B 等）先还原
+  if (s.includes('%')) {
+    try { s = decodeURIComponent(s) } catch { /* 忽略，继续按原样处理 */ }
+  }
+  // 去掉所有空白/换行
+  s = s.replace(/\s+/g, '')
+
+  let mime = 'image/jpeg'
+  const m = s.match(/^data:([^;,]+);base64,(.*)$/i)
+  if (m) {
+    mime = m[1]
+    s = m[2]
+  }
+  // URL-safe base64 -> 标准 base64
+  s = s.replace(/-/g, '+').replace(/_/g, '/')
+  // 补齐 padding
+  const pad = s.length % 4
+  if (pad === 2) s += '=='
+  else if (pad === 3) s += '='
+
+  if (s.length < 32 || !/^[A-Za-z0-9+/=]+$/.test(s)) return null
+
+  return { raw: s, mime, dataUrl: `data:${mime};base64,${s}` }
+}
+
+/** 调用 Agnes，返回 { ok, status, data, errorText } */
+async function callAgnes(apiKey, imageUrl) {
+  const resp = await fetch(AGNES_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: AGNES_MODEL,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: imageUrl } },
+          { type: 'text', text: EVALUATION_PROMPT }
+        ]
+      }],
+      max_tokens: 1500,
+      temperature: 0.7
+    })
+  })
+
+  const text = await resp.text()
+  let data = null
+  try { data = JSON.parse(text) } catch { /* 非 JSON 响应 */ }
+
+  return {
+    ok: resp.ok,
+    status: resp.status,
+    data,
+    errorText: data?.error?.message || data?.message || data?.error || (text || '').slice(0, 300)
+  }
+}
+
 async function handleEvaluate(request, env) {
   const apiKey = env.AGNES_API_KEY
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'AGNES_API_KEY 未配置，请在 Cloudflare 控制台添加环境变量' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    return json({ error: '后端未配置 AGNES_API_KEY（Cloudflare Worker 环境变量）' }, 500)
   }
 
   let body
   try {
     body = await request.json()
   } catch {
-    return new Response(JSON.stringify({ error: '请求体解析失败' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    return json({ error: '请求体解析失败' }, 400)
   }
 
-  const imageB64 = body.image
-  if (!imageB64) {
-    return new Response(JSON.stringify({ error: '请上传菜品照片' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+  const image = normalizeImage(body.image)
+  if (!image) {
+    return json({ error: '图片数据格式不正确，请重新上传照片' }, 400)
   }
 
   try {
-    const resp = await fetch('https://apihub.agnes-ai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'agnes-2.5-flash',
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image_url', image_url: { url: imageB64 } },
-            { type: 'text', text: EVALUATION_PROMPT }
-          ]
-        }],
-        max_tokens: 1500,
-        temperature: 0.7
-      })
-    })
-
-    const result = await resp.json()
-    
-    if (result.error) {
-      return new Response(JSON.stringify({ error: result.error.message || 'API 请求失败' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-      })
+    // 优先用标准 data URL；若上游报 base64 相关错误，回退为纯 base64 再试一次
+    // （上游网关对是否带 data: 前缀的处理不一致，报错文案为 "Non-base64 digit found"）
+    let result = await callAgnes(apiKey, image.dataUrl)
+    if (!result.ok || result.data?.error) {
+      const msg = String(result.errorText || '')
+      if (/base64|image_url|invalid.*image|decode/i.test(msg)) {
+        console.error('data URL 调用失败，回退纯 base64：', msg)
+        result = await callAgnes(apiKey, image.raw)
+      }
     }
 
-    if (!result?.choices?.[0]) {
-        console.error('No choices in response:', JSON.stringify(result).substring(0, 500))
-        return new Response(JSON.stringify({ error: 'AI 返回格式异常，请稍后重试' }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-        })
-      }
-    const content = result.choices[0].message.content || ''
+    if (!result.ok || result.data?.error) {
+      console.error('Agnes 调用失败:', result.status, result.errorText)
+      return json({ error: result.errorText || `上游接口返回 HTTP ${result.status}`, status: result.status }, 502)
+    }
+
+    const content = result.data?.choices?.[0]?.message?.content || ''
 
     // 提取 JSON
     const start = content.indexOf('{')
@@ -118,9 +165,15 @@ async function handleEvaluate(request, env) {
       }
     }
 
+    // 兼容模型把 story 当分数返回的情况
+    if (typeof data.story === 'number' && data.story_score === undefined) {
+      data.story_score = data.story
+      data.story = ''
+    }
+
     // 补充默认值
     const defaults = {
-      color: 6.0, composition: 6.0, texture: 6.0, appetite: 6.0,
+      color: 6.0, composition: 6.0, texture: 6.0, appetite: 6.0, story_score: 6.0,
       story: '这是一道充满生活气息的家常美味',
       overall_score: 65, persona_label: '佛系干饭派',
       persona_desc: '好好吃饭，认真生活',
@@ -128,17 +181,13 @@ async function handleEvaluate(request, env) {
       share_text: '快来测测你的餐桌人格！'
     }
     for (const [k, v] of Object.entries(defaults)) {
-      if (!(k in data)) data[k] = v
+      if (!(k in data) || data[k] === null || data[k] === '') data[k] = v
     }
 
-    return new Response(JSON.stringify({ success: true, data }), {
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    return json({ success: true, data })
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    console.error('handleEvaluate 异常:', err && err.stack || err)
+    return json({ error: err.message || '服务异常' }, 500)
   }
 }
 

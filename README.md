@@ -4,7 +4,7 @@
 
 ## 在线体验
 
-> [待部署后填写 GitHub Pages 链接]
+> https://writtyflame.github.io/food-aesthetics/
 
 ---
 
@@ -24,7 +24,7 @@
 ```
 前端 (GitHub Pages)          后端 (Cloudflare Workers)
 ┌─────────────────┐         ┌──────────────────────┐
-│  index.html     │  ──POST──▶ │  /api/evaluate       │
+│  index.html     │  ──POST──▶ │  /evaluate / /api/evaluate │
 │  css/style.css  │  (base64)  │  → Agnes AI VL API   │
 │  js/app.js      │  ◀──JSON── │  → 返回评分结果      │
 └─────────────────┘         └──────────────────────┘
@@ -41,14 +41,14 @@
 ### 1. 安装依赖
 
 ```bash
-# Cloudflare Worker
+# Cloudflare Worker CLI（仅部署时需要）
 npm install -g wrangler
 wrangler login
 ```
 
 ### 2. 配置 API Key
 
-在 `backend/.env.example` 基础上，创建 `.env` 文件或在 Cloudflare 控制台添加环境变量：
+在 `backend/.env.example` 基础上，创建 `.env` 文件（仅本地运行后端需要；部署后在 Cloudflare 控制台配置）：
 
 ```
 AGNES_API_KEY=your_agnes_api_key_here
@@ -56,14 +56,32 @@ AGNES_API_KEY=your_agnes_api_key_here
 
 ### 3. 本地运行
 
-```bash
-# 前端（静态文件服务）
-npx serve frontend/ -p 3000
+> ⚠️ **Windows 注意**：直接用 `wrangler dev` 在本机会报 `spawn EFTYPE`（workerd 原生二进制无法被 spawn），无法启动。
+> 仓库内置了 `backend/local-server.mjs`，用 Node 直接跑 `worker.js`，效果等同本地 Worker，规避该问题。
 
-# 后端 Worker（本地）
+```bash
+# 后端（本地适配服务，端口 8787，自动读取 backend/.env 的 AGNES_API_KEY）
 cd backend
-wrangler dev
+node local-server.mjs
+# 或：调试 Worker 本身报错时，看实时日志
+#   npx wrangler tail cantingshi-api   （需 wrangler 已登录）
+
+# 前端（静态文件服务，端口 8080）
+cd frontend
+python -m http.server 8080
+# 或：npx serve frontend/ -p 8080
 ```
+
+打开 http://localhost:8080 即可预览。
+
+### 4. 前后端联调：切换 API_BASE
+
+前端 `frontend/js/app.js` 第一行 `API_BASE` 决定请求打到哪：
+
+- **本地联调**：设为 `http://localhost:8787`（配合上面 `local-server.mjs`）
+- **部署/线上**：设为 `https://cantingshi-api.906143430.workers.dev`
+
+> 改完记得：**本地测试 → 改回线上地址 → 再 push / wrangler deploy**，否则线上会连到本地。
 
 ---
 
@@ -116,9 +134,9 @@ wrangler dev
 
 ### Part 4：连接前后端
 
-1. 打开 `frontend/js/app.js`
-2. 找到第一行，API_BASE 已经是 `/api`，因为 Worker 会处理相对路径
-3. 如果部署在 Cloudflare，直接可用，无需修改
+1. 打开 `frontend/js/app.js`，确认第一行 `API_BASE` 指向你的 Worker 地址
+2. 默认已填线上 Worker：`https://cantingshi-api.906143430.workers.dev`
+3. 本地联调时改回 `http://localhost:8787`（详见上方「本地开发」小节），联调完再改回线上地址
 
 ---
 
@@ -177,6 +195,7 @@ cepingwebsite/
 │       └── app.js        # 前端逻辑（上传/调用API/渲染/分享）
 ├── backend/
 │   ├── worker.js         # Cloudflare Worker 主程序（Agnes AI）
+│   ├── local-server.mjs  # 本地开发适配服务（Node 直接跑 worker.js，规避 Windows wrangler dev 问题）
 │   ├── wrangler.toml     # Worker 配置
 │   ├── app.py            # Flask 本地开发版（备用）
 │   ├── requirements.txt
