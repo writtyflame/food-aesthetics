@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>食物美学评测 · AI餐评师</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- ===== 首页 / 上传页 ===== -->
+  <div id="page-upload" class="page active">
+    <div class="hero">
+      <div class="hero-bg"></div>
+      <div class="hero-content">
+        <div class="logo">
+          <span class="logo-icon">🍽</span>
+          <span class="logo-text">餐评师</span>
+        </div>
+        <h1 class="title">你的每顿饭<br/>都值得被认真评价</h1>
+        <p class="subtitle">AI 从六个美学维度，解读你餐桌上的故事</p>
+        <div class="tags">
+          <span class="tag">🎨 色彩和谐度</span>
+          <span class="tag">📐 构图美感</span>
+          <span class="tag">✨ 质感对比</span>
+          <span class="tag">🔥 食欲指数</span>
+          <span class="tag">📖 餐桌故事</span>
+          <span class="tag">💯 综合评分</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="upload-section">
+      <div class="upload-card" id="drop-zone">
+        <div class="upload-placeholder" id="upload-placeholder">
+          <div class="upload-icon">
+            <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M32 8V40M32 8L22 18M32 8L42 18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M52 44C52 53.389 44.389 60 36 60H28C19.611 60 12 53.389 12 44V28C12 18.611 19.611 12 28 12H36C44.389 12 52 18.611 52 28V44Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="24" cy="22" r="4" stroke="currentColor" stroke-width="2"/>
+              <path d="M18 38L24 32L30 38L36 30L42 38" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <p class="upload-title">上传菜品照片</p>
+          <p class="upload-hint">支持 JPG、PNG，最大 10MB</p>
+          <p class="upload-alternative">或者拖拽照片到此处</p>
+        </div>
+        <img id="preview-img" class="preview-img" src="" alt="预览" style="display:none;" />
+        <button id="change-photo-btn" class="change-btn" style="display:none;">更换照片</button>
+      </div>
+      <input type="file" id="file-input" accept="image/*" style="display:none;" />
+      <button id="analyze-btn" class="analyze-btn" disabled>
+        <span class="btn-icon">🔍</span>
+        <span class="btn-text">开始AI评测</span>
+      </button>
+      <p class="disclaimer">AI分析仅供参考，美味由心定义</p>
+    </div>
+
+    <div class="footer">
+      <p>由 AI 通义千问 VL 驱动 · 美食美学实验室</p>
+    </div>
+  </div>
+
+  <!-- ===== 分析中页 ===== -->
+  <div id="page-loading" class="page">
+    <div class="loading-content">
+      <div class="scanner">
+        <div class="scan-line"></div>
+        <div class="scan-box">
+          <img id="scan-preview" src="" alt="" />
+        </div>
+      </div>
+      <h2 class="loading-title">AI 正在品鉴中…</h2>
+      <p class="loading-subtitle" id="loading-tip">正在分析色彩搭配</p>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <p class="progress-text"><span id="progress-pct">0</span>%</p>
+    </div>
+  </div>
+
+  <!-- ===== 结果页 ===== -->
+  <div id="page-result" class="page">
+    <div class="result-container">
+      <!-- 评分头部 -->
+      <div class="result-header">
+        <div class="score-circle">
+          <svg class="score-ring" viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="52" class="ring-bg" />
+            <circle cx="60" cy="60" r="52" class="ring-fill" id="ring-fill" />
+          </svg>
+          <span class="score-number" id="score-number">0</span>
+          <span class="score-label">综合评分</span>
+        </div>
+        <div class="persona-badge" id="persona-badge">
+          <span class="persona-emoji" id="persona-emoji">🍳</span>
+          <span class="persona-name" id="persona-name">暖心治愈派</span>
+        </div>
+        <p class="persona-desc" id="persona-desc">你的餐桌是治愈系港湾</p>
+      </div>
+
+      <!-- 故事 -->
+      <div class="story-card">
+        <div class="story-icon">📖</div>
+        <p class="story-text" id="story-text">这道菜传递了家庭聚餐的温暖氛围</p>
+      </div>
+
+      <!-- 六个维度 -->
+      <div class="dimensions">
+        <h3 class="section-title">六维美学分析</h3>
+        <div class="dim-row" data-dim="color">
+          <div class="dim-info">
+            <span class="dim-emoji">🎨</span>
+            <span class="dim-name">色彩和谐度</span>
+          </div>
+          <div class="dim-bar-wrap">
+            <div class="dim-bar-bg"><div class="dim-bar-fill" id="bar-color" style="width:0%"></div></div>
+            <span class="dim-score" id="score-color">0</span>
+          </div>
+        </div>
+        <div class="dim-row" data-dim="composition">
+          <div class="dim-info">
+            <span class="dim-emoji">📐</span>
+            <span class="dim-name">构图美感</span>
+          </div>
+          <div class="dim-bar-wrap">
+            <div class="dim-bar-bg"><div class="dim-bar-fill" id="bar-composition" style="width:0%"></div></div>
+            <span class="dim-score" id="score-composition">0</span>
+          </div>
+        </div>
+        <div class="dim-row" data-dim="texture">
+          <div class="dim-info">
+            <span class="dim-emoji">✨</span>
+            <span class="dim-name">质感对比</span>
+          </div>
+          <div class="dim-bar-wrap">
+            <div class="dim-bar-bg"><div class="dim-bar-fill" id="bar-texture" style="width:0%"></div></div>
+            <span class="dim-score" id="score-texture">0</span>
+          </div>
+        </div>
+        <div class="dim-row" data-dim="appetite">
+          <div class="dim-info">
+            <span class="dim-emoji">🔥</span>
+            <span class="dim-name">食欲指数</span>
+          </div>
+          <div class="dim-bar-wrap">
+            <div class="dim-bar-bg"><div class="dim-bar-fill" id="bar-appetite" style="width:0%"></div></div>
+            <span class="dim-score" id="score-appetite">0</span>
+          </div>
+        </div>
+        <div class="dim-row" data-dim="story">
+          <div class="dim-info">
+            <span class="dim-emoji">📖</span>
+            <span class="dim-name">餐桌故事感</span>
+          </div>
+          <div class="dim-bar-wrap">
+            <div class="dim-bar-bg"><div class="dim-bar-fill" id="bar-story" style="width:0%"></div></div>
+            <span class="dim-score" id="score-story">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 建议卡片 -->
+      <div class="tips-card">
+        <h3 class="section-title">🌟 美学提升建议</h3>
+        <ul class="tips-list" id="tips-list"></ul>
+      </div>
+
+      <!-- 原图 -->
+      <div class="original-photo">
+        <img id="result-photo" src="" alt="原图" />
+        <p class="photo-caption">你的餐桌瞬间</p>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="action-buttons">
+        <button class="btn-share" id="share-btn">
+          <span class="btn-share-icon">📤</span>
+          <span>分享结果</span>
+        </button>
+        <button class="btn-retake" id="retake-btn">
+          <span>🔄</span>
+          <span>再测一次</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 分享弹窗 -->
+    <div class="share-modal" id="share-modal">
+      <div class="share-modal-inner">
+        <div class="share-close" id="share-close">×</div>
+        <h3>生成分享海报</h3>
+        <canvas id="share-canvas" style="display:none;"></canvas>
+        <img id="share-img" src="" alt="分享海报" style="max-width:100%;border-radius:12px;" />
+        <p class="share-hint">长按保存海报，分享给朋友吧～</p>
+        <button class="btn-copy" id="copy-btn">复制文字</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
