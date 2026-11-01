@@ -264,6 +264,14 @@ function generateSharePoster() {
     ctx.stroke();
     
     drawPosterContent(ctx, W, H, data, score);
+    var shareImg = document.getElementById("share-img");
+    if (shareImg) shareImg.src = canvas.toDataURL("image/png");
+  };
+  img.crossOrigin = "anonymous";
+  img.onerror = function() {
+    drawPosterContent(ctx, W, H, data, score);
+    var shareImg = document.getElementById("share-img");
+    if (shareImg) shareImg.src = canvas.toDataURL("image/png");
   };
   img.src = currentImageBase64;
 }
@@ -377,8 +385,14 @@ function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
 
 // ===== 复制分享文案 =====
 $('copy-btn').addEventListener('click', () => {
-  const text = currentResult?.share_text || 'AI给我的晚餐打了' + (currentResult?.overall_score || 0) + '分，说我是一个「' + (currentResult?.persona_label || '') + '」食客～快来测测你的餐桌人格！';
-  navigator.clipboard.writeText(text).then(() => {
+  const score = currentResult?.overall_score || 65;
+  const persona = currentResult?.persona_label || '佛系干饭派';
+  const siteUrl = 'https://writtyflame.github.io/food-aesthetics/';
+  const customText = currentResult?.share_text;
+  const hasCustomText = customText && customText !== '快来测测你的餐桌人格！' && customText !== 'AI给我的晚餐打了' + (currentResult?.overall_score || 0) + '分';
+  const text = hasCustomText
+    ? customText + '\n\n' + siteUrl
+    : '🍽 AI给我的晚餐打了' + score + '分，说我是一个「' + persona + '」食客～\n' + siteUrl + ' 来测测你的餐桌人格！';navigator.clipboard.writeText(text).then(() => {
     $('copy-btn').textContent = '✅ 已复制';
     setTimeout(() => { $('copy-btn').textContent = '复制文字'; }, 2000);
   }).catch(() => {

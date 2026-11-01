@@ -97,7 +97,14 @@ async function handleEvaluate(request, env) {
       })
     }
 
-    const content = result?.choices?.[0]?.message?.content || ''
+    if (!result?.choices?.[0]) {
+        console.error('No choices in response:', JSON.stringify(result).substring(0, 500))
+        return new Response(JSON.stringify({ error: 'AI 返回格式异常，请稍后重试' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        })
+      }
+    const content = result.choices[0].message.content || ''
 
     // 提取 JSON
     const start = content.indexOf('{')
@@ -107,7 +114,7 @@ async function handleEvaluate(request, env) {
       try {
         data = JSON.parse(content.substring(start, end + 1))
       } catch (e) {
-        console.error('JSON parse error:', e)
+        console.error('JSON parse error:', e, 'content:', content.substring(0, 500))
       }
     }
 
@@ -150,11 +157,11 @@ export default {
 
     const url = new URL(request.url)
     
-    if (url.pathname === '/api/evaluate' && request.method === 'POST') {
+    if ((url.pathname === '/api/evaluate' || url.pathname === '/evaluate') && request.method === 'POST') {
       return handleEvaluate(request, env)
     }
     
-    if (url.pathname === '/api/health') {
+    if (url.pathname === '/api/health' || url.pathname === '/health') {
       return new Response(JSON.stringify({ status: 'ok', model: 'agnes-2.5-flash' }), {
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       })
