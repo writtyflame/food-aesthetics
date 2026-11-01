@@ -110,13 +110,17 @@ function stopLoading() {
 
 // ===== 调用API =====
 async function callAPI(imageBase64) {
-  // 去掉 data:image/...;base64, 前缀
+  // remove data URL prefix
   const b64Data = imageBase64.split(',')[1];
+  // infer MIME type
+  const mimeMatch = imageBase64.match(/^data:(image\/[^;]+);base64,/);
+  const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+  const dataUrl = "data:" + mimeType + ";base64," + b64Data;
   
   const resp = await fetch(API_BASE + '/evaluate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: 'data:image/png;base64,' + b64Data })
+    body: JSON.stringify({ image: dataUrl })
   });
   
   if (!resp.ok) throw new Error('请求失败');
