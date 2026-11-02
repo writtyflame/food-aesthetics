@@ -14,3 +14,6 @@ R2_PUBLIC_URL = "https://pub-45fd73b0b41343ba8fef221663eb1a8a.r2.dev"
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "food-images"
+
+[placement]
+mode = "smart"
