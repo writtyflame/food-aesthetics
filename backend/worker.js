@@ -193,12 +193,12 @@ function friendlyError(result) {
       message: '上游 AI 免费额度已用尽，需要升级套餐或稍后重试',
     }
   }
-  // Cloudflare Error 1015：Agnes 整站按出口 IP 段拦截 Cloudflare Workers 的请求
-  // （实测 /v1/models、首页均 429/1015，换 UA/域名/请求头都无效），等一会也不会好
+  // Cloudflare Error 1015：上游网关按出口 IP 限流。Workers 出口是共享 IP 池，
+  // 偶发被连带限流（实测同一出口时通时不通），退避重试通常可恢复。
   if (/1015/i.test(text)) {
     return {
-      code: 'PROVIDER_BLOCKED',
-      message: 'AI 服务商（Agnes）屏蔽了云端函数发起的请求（Cloudflare Error 1015），需更换模型服务商或加一层中转服务',
+      code: 'UPSTREAM_RATE_LIMITED',
+      message: '上游网关按出口 IP 限流（Cloudflare Error 1015），云端出口是共享 IP，偶发命中；已自动重试，仍失败请等 1–2 分钟再试',
     }
   }
   if (status === 429 || /rate limited|too many requests|429/i.test(text)) {
@@ -213,19 +213,18 @@ function friendlyError(result) {
   }
 }
 
-/** 是否值得重试（限流类可以，额度用尽/被拦截/参数错误不行） */
+/** 是否值得重试（限流类可以，额度用尽/参数错误不行） */
 function isRetryable(result) {
   const text = String(result.errorText || '')
   if (/reached the API rate limit for free users|Token Plan/i.test(text)) return false
-  if (/1015/i.test(text)) return false // 整站拦截出口 IP，重试无意义
-  return result.status === 429 || /rate limited|too many requests/i.test(text)
+  return result.status === 429 || /rate limited|too many requests|1015/i.test(text)
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-/** 带退避重试的 Agnes 调用（仅对限流类错误重试，不额外消耗额度） */
+/** 带退避重试的 Agnes 调用（仅对限流类错误重试，成功前不额外消耗额度） */
 async function callAgnesWithRetry(apiKey, imageUrl) {
-  const delays = [0, 1200, 3000]
+  const delays = [0, 2000, 6000]
   let result
   for (let i = 0; i < delays.length; i++) {
     if (delays[i]) await sleep(delays[i])
@@ -233,7 +232,7 @@ async function callAgnesWithRetry(apiKey, imageUrl) {
     const failed = !result.ok || result.data?.error
     if (!failed) return result
     if (!isRetryable(result)) return result
-    console.warn(`Agnes 限流，第 ${i + 1} 次重试前等待 ${delays[i + 1] || 0}ms，状态 ${result.status}`)
+    console.warn(`Agnes 限流（${result.status}），第 ${i + 1}/${delays.length} 次尝试`)
   }
   return result
 }
