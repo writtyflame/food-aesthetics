@@ -1,13 +1,13 @@
 /**
  * Cloudflare Worker — AI食物美学评测 API
- * 使用 Agnes AI (agnes-2.5-flash 多模态模型)
- * 
+ * 使用 智谱 GLM-4V-Flash（永久免费的多模态视觉模型，OpenAI 兼容）
+ *
  * 部署方式：wrangler.toml + wrangler deploy
- * 环境变量：AGNES_API_KEY（在 Cloudflare 控制台添加）
- * 
+ * 环境变量：GLM_API_KEY（在 Cloudflare 控制台添加，open.bigmodel.cn 免费注册获取）
+ *
  * 路由：
- *   POST /evaluate | /api/evaluate   评测（默认把 base64 内联给 Agnes；失败时退回 R2 + /img/<key> URL）
- *   GET  /img/<key>                  从 R2 直读图片（兜底/调试用，规避 r2.dev 的 1015 限流）
+ *   POST /evaluate | /api/evaluate   评测（base64 data URL 内联给 GLM，零图床依赖）
+ *   GET  /img/<key>                  从 R2 直读图片（保留作兜底/调试）
  *   GET  /health | /api/health       健康检查
  */
 
@@ -46,8 +46,9 @@ const EVALUATION_PROMPT = `你是一位专业的美食美学分析师，擅长�
 
 注意：对任何菜品都要找到亮点，给予鼓励性评价。`
 
-const AGNES_ENDPOINT = 'https://apihub.agnes-ai.com/v1/chat/completions'
-const AGNES_MODEL = 'agnes-2.5-flash'
+// 视觉模型：智谱 GLM-4V-Flash（永久免费，OpenAI 兼容，支持 base64 data URL 内联）
+const VISION_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+const VISION_MODEL = 'glm-4v-flash'
 
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
   status,
@@ -88,23 +89,22 @@ function normalizeImage(input) {
 }
 
 /**
- * 调用 Agnes，返回 { ok, status, data, errorText }
- * imageRef = { kind: 'base64', value } | { kind: 'url', value }
- *   kind='base64' 时 url 字段直接塞纯 base64 串（Agnes 对非 http 串按 base64 解码）
+ * 调用 GLM-4V-Flash，返回 { ok, status, data, errorText }
+ * 图片以 base64 data URL 内联进 messages（GLM 直接读内联图，无需公网图床）。
  */
-async function callAgnes(apiKey, imageRef) {
-  const resp = await fetch(AGNES_ENDPOINT, {
+async function callVision(apiKey, image) {
+  const resp = await fetch(VISION_ENDPOINT, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: AGNES_MODEL,
+      model: VISION_MODEL,
       messages: [{
         role: 'user',
         content: [
-          { type: 'image_url', image_url: { url: imageRef.value } },
+          { type: 'image_url', image_url: { url: image.dataUrl } },
           { type: 'text', text: EVALUATION_PROMPT }
         ]
       }],
@@ -126,35 +126,8 @@ async function callAgnes(apiKey, imageRef) {
 }
 
 /**
- * 把 base64 图片上传到 R2 桶，返回对象 key（不是 URL）。
+ * 用 Worker 代理 R2 对象（保留作兜底/调试，当前主链路不依赖图床）
  */
-async function uploadToR2(env, b64, mime) {
-  const clean = String(b64).replace(/[^A-Za-z0-9+/=]/g, '')
-  if (!clean) throw new Error('图片 base64 数据为空')
-  const bytes = Uint8Array.from(atob(clean), c => c.charCodeAt(0))
-  const ext = mime === 'image/png' ? 'png' : 'jpg'
-  const key = `eval/${crypto.randomUUID()}.${ext}`
-  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: mime } })
-  return key
-}
-
-/**
- * 构造给 Agnes 拉取的图片 URL。
- * 默认走 Worker 自己的 /img/<key> 代理（同域、无限流），
- * 而不是 r2.dev 公开域名——r2.dev 被 Cloudflare 限流（Error 1015），仅供开发测试。
- * 如需改回 r2.dev：设置环境变量 IMAGE_BASE_URL=R2（或直接给 R2_PUBLIC_URL 并在 USE_R2_PUBLIC=1 时启用）。
- */
-function buildImageUrl(request, env, key) {
-  if (env.IMAGE_BASE_URL && env.IMAGE_BASE_URL !== 'R2') {
-    return `${String(env.IMAGE_BASE_URL).replace(/\/+$/, '')}/img/${key}`
-  }
-  if (env.IMAGE_BASE_URL === 'R2' || env.USE_R2_PUBLIC === '1') {
-    return `${String(env.R2_PUBLIC_URL).replace(/\/+$/, '')}/${key}`
-  }
-  return `${new URL(request.url).origin}/img/${key}`
-}
-
-/** 用 Worker 代理 R2 对象，规避 r2.dev 的 1015 限流 */
 async function handleImage(env, key) {
   if (!env.BUCKET) return new Response('Not Found', { status: 404 })
   if (!/^eval\/[A-Za-z0-9._-]+$/.test(key)) {
@@ -192,35 +165,35 @@ function isImageLoadError(result) {
 
 /**
  * 给前端的友好错误文案
- * 1015 = Cloudflare 限流（HTTP 429）；Agnes 免费额度用尽是另一类
  */
 function friendlyError(result) {
   const text = String(result.errorText || '')
   const status = result.status || 0
-  if (/reached the API rate limit for free users|Token Plan/i.test(text)) {
+
+  // 限流：429 或高频/并发类文案
+  if (/rate limit|too many requests|429|请求频率|QPS|并发|frequency/i.test(text) || status === 429) {
     return {
-      code: 'AGNES_QUOTA',
-      message: '上游 AI 免费额度已用尽，需要升级套餐或稍后重试',
+      code: 'UPSTREAM_RATE_LIMITED',
+      message: '上游免费接口限流（HTTP 429），请等待约 1 分钟后再试',
+    }
+  }
+  // 额度/余额类
+  if (/quota|余额|额度|余额不足|credit|insufficient/i.test(text)) {
+    return {
+      code: 'UPSTREAM_QUOTA',
+      message: '上游模型额度不足（GLM 免费档有并发/频率限制），请稍后重试',
     }
   }
   if (isImageLoadError(result)) {
     return {
       code: 'IMAGE_LOAD_FAILED',
-      message: '上游 AI 读取图片失败（内联 base64 与图片 URL 两种方式均未成功），请换一张更小、更常见的 JPG/PNG 图片再试',
+      message: '上游读取图片失败，请换一张更小、更常见的 JPG/PNG 图片再试',
     }
   }
-  // Cloudflare Error 1015：上游网关按出口 IP 限流。Workers 出口是共享 IP 池，
-  // 偶发被连带限流（实测同一出口时通时不通），退避重试通常可恢复。
-  if (/1015/i.test(text)) {
+  if (/401|unauthorized|invalid.*key|API key/i.test(text) || status === 401) {
     return {
-      code: 'UPSTREAM_RATE_LIMITED',
-      message: '上游网关按出口 IP 限流（Cloudflare Error 1015），云端出口是共享 IP，偶发命中；已自动重试，仍失败请等 1–2 分钟再试',
-    }
-  }
-  if (status === 429 || /rate limited|too many requests|429/i.test(text)) {
-    return {
-      code: 'UPSTREAM_RATE_LIMITED',
-      message: '上游服务限流（HTTP 429），请等待约 1 分钟后重试',
+      code: 'BAD_KEY',
+      message: '后端 GLM_API_KEY 无效或未配置，请联系站长',
     }
   }
   return {
@@ -229,35 +202,36 @@ function friendlyError(result) {
   }
 }
 
-/** 是否值得重试（限流类可以，额度用尽/参数错误/图片读不出不行） */
+/** 是否值得重试（仅限流类） */
 function isRetryable(result) {
   const text = String(result.errorText || '')
-  if (/reached the API rate limit for free users|Token Plan/i.test(text)) return false
+  if (/quota|余额|额度|credit|insufficient/i.test(text)) return false
   if (isImageLoadError(result)) return false
-  return result.status === 429 || /rate limited|too many requests|1015/i.test(text)
+  if (/401|unauthorized|invalid.*key|API key/i.test(text) || result.status === 401) return false
+  return result.status === 429 || /rate limit|too many requests/i.test(text)
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-/** 带退避重试的 Agnes 调用（仅对限流类错误重试） */
-async function callAgnesWithRetry(apiKey, imageRef) {
+/** 带退避重试的视觉模型调用（仅对限流类错误重试） */
+async function callVisionWithRetry(apiKey, image) {
   const delays = [0, 2000, 6000]
   let result
   for (let i = 0; i < delays.length; i++) {
     if (delays[i]) await sleep(delays[i])
-    result = await callAgnes(apiKey, imageRef)
+    result = await callVision(apiKey, image)
     const failed = !result.ok || result.data?.error
     if (!failed) return result
     if (!isRetryable(result)) return result
-    console.warn(`Agnes 限流（${result.status}），第 ${i + 1}/${delays.length} 次尝试`)
+    console.warn(`GLM 限流（${result.status}），第 ${i + 1}/${delays.length} 次尝试`)
   }
   return result
 }
 
 async function handleEvaluate(request, env) {
-  const apiKey = env.AGNES_API_KEY
+  const apiKey = env.GLM_API_KEY
   if (!apiKey) {
-    return json({ error: '后端未配置 AGNES_API_KEY（Cloudflare Worker 环境变量）' }, 500)
+    return json({ error: '后端未配置 GLM_API_KEY（Cloudflare Worker 环境变量，open.bigmodel.cn 免费获取）' }, 500)
   }
 
   let body
@@ -273,33 +247,17 @@ async function handleEvaluate(request, env) {
   }
 
   try {
-    // 主方案：把 base64 直接内联进请求。
-    // Agnes 的图片加载逻辑是「http 开头当 URL 去拉，否则当 base64 解码」，
-    // 而 *.workers.dev / *.r2.dev 在中国大陆 DNS 被污染，由它去拉图必然失败
-    // （表现为 "An exception occurred while loading IMAGE data at index 0"）。
-    const inlineRef = { kind: 'base64', value: image.raw }
-    let used = 'inline-base64'
-    let result = await callAgnesWithRetry(apiKey, inlineRef)
-    let imageUrl = null
-
-    // 兜底：内联失败且图片读取类错误 → 退回 R2 + Worker /img 公开 URL 再试一次
-    if ((!result.ok || result.data?.error) && isImageLoadError(result) && env.BUCKET) {
-      console.log('内联 base64 失败，改用 R2 URL 兜底:', cleanErrorText(result.errorText))
-      const key = await uploadToR2(env, image.raw, image.mime)
-      imageUrl = buildImageUrl(request, env, key)
-      used = 'r2-url'
-      result = await callAgnesWithRetry(apiKey, { kind: 'url', value: imageUrl })
-    }
+    // 主方案：base64 data URL 内联，GLM 直接读图，零图床依赖，不走 Worker 公网出口拉图。
+    let result = await callVisionWithRetry(apiKey, image)
 
     if (!result.ok || result.data?.error) {
-      console.error(`Agnes 调用失败（${used}）:`, result.status, cleanErrorText(result.errorText))
+      console.error('GLM 调用失败:', result.status, cleanErrorText(result.errorText))
       const friendly = friendlyError(result)
       return json({
         error: friendly.message,
         code: friendly.code,
         upstreamStatus: result.status,
-        transport: used,
-        imageUrl
+        transport: 'inline-base64'
       }, 502)
     }
 
@@ -336,7 +294,7 @@ async function handleEvaluate(request, env) {
       if (!(k in data) || data[k] === null || data[k] === '') data[k] = v
     }
 
-    return json({ success: true, data, transport: used })
+    return json({ success: true, data, transport: 'inline-base64' })
   } catch (err) {
     console.error('handleEvaluate 异常:', err && err.stack || err)
     return json({ error: err.message || '服务异常' }, 500)
@@ -362,12 +320,12 @@ export default {
       return handleEvaluate(request, env)
     }
 
-    // 图片代理：Agnes 从这里拉图（同域，不受 r2.dev 的 1015 限流影响）
+    // 图片代理：保留作兜底/调试（当前主链路不依赖图床）
     if (url.pathname.startsWith('/img/')) {
       return handleImage(env, decodeURIComponent(url.pathname.slice('/img/'.length)))
     }
 
-    if (url.pathname === '/api/health' || url.pathname === '/health') {      return new Response(JSON.stringify({ status: 'ok', model: 'agnes-2.5-flash' }), {
+    if (url.pathname === '/api/health' || url.pathname === '/health') {      return new Response(JSON.stringify({ status: 'ok', model: 'glm-4v-flash' }), {
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       })
     }
