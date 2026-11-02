@@ -108,7 +108,7 @@ async function callVision(apiKey, image) {
           { type: 'text', text: EVALUATION_PROMPT }
         ]
       }],
-      max_tokens: 1500,
+      max_tokens: 800,
       temperature: 0.7
     })
   })
