@@ -6,8 +6,8 @@
  * 环境变量：AGNES_API_KEY（在 Cloudflare 控制台添加）
  * 
  * 路由：
- *   POST /evaluate | /api/evaluate   评测（图片存 R2 → 用 /img/<key> 公开 URL 喂 Agnes）
- *   GET  /img/<key>                  从 R2 直读图片（替代 r2.dev，规避 Cloudflare 1015 限流）
+ *   POST /evaluate | /api/evaluate   评测（默认把 base64 内联给 Agnes；失败时退回 R2 + /img/<key> URL）
+ *   GET  /img/<key>                  从 R2 直读图片（兜底/调试用，规避 r2.dev 的 1015 限流）
  *   GET  /health | /api/health       健康检查
  */
 
@@ -87,8 +87,12 @@ function normalizeImage(input) {
   return { raw: s, mime, dataUrl: `data:${mime};base64,${s}` }
 }
 
-/** 调用 Agnes，返回 { ok, status, data, errorText } */
-async function callAgnes(apiKey, imageUrl) {
+/**
+ * 调用 Agnes，返回 { ok, status, data, errorText }
+ * imageRef = { kind: 'base64', value } | { kind: 'url', value }
+ *   kind='base64' 时 url 字段直接塞纯 base64 串（Agnes 对非 http 串按 base64 解码）
+ */
+async function callAgnes(apiKey, imageRef) {
   const resp = await fetch(AGNES_ENDPOINT, {
     method: 'POST',
     headers: {
@@ -100,7 +104,7 @@ async function callAgnes(apiKey, imageUrl) {
       messages: [{
         role: 'user',
         content: [
-          { type: 'image_url', image_url: { url: imageUrl } },
+          { type: 'image_url', image_url: { url: imageRef.value } },
           { type: 'text', text: EVALUATION_PROMPT }
         ]
       }],
@@ -180,6 +184,12 @@ function cleanErrorText(raw) {
     .slice(0, 200)
 }
 
+/** 是否是「图片读不出来」类错误（换投递方式可能有救，而非额度/参数问题） */
+function isImageLoadError(result) {
+  const text = String(result.errorText || '')
+  return /loading IMAGE data|while loading data|Non-base64 digit|invalid image|image.*(load|fetch|download)|failed to (load|fetch|download) image/i.test(text)
+}
+
 /**
  * 给前端的友好错误文案
  * 1015 = Cloudflare 限流（HTTP 429）；Agnes 免费额度用尽是另一类
@@ -191,6 +201,12 @@ function friendlyError(result) {
     return {
       code: 'AGNES_QUOTA',
       message: '上游 AI 免费额度已用尽，需要升级套餐或稍后重试',
+    }
+  }
+  if (isImageLoadError(result)) {
+    return {
+      code: 'IMAGE_LOAD_FAILED',
+      message: '上游 AI 读取图片失败（内联 base64 与图片 URL 两种方式均未成功），请换一张更小、更常见的 JPG/PNG 图片再试',
     }
   }
   // Cloudflare Error 1015：上游网关按出口 IP 限流。Workers 出口是共享 IP 池，
@@ -213,22 +229,23 @@ function friendlyError(result) {
   }
 }
 
-/** 是否值得重试（限流类可以，额度用尽/参数错误不行） */
+/** 是否值得重试（限流类可以，额度用尽/参数错误/图片读不出不行） */
 function isRetryable(result) {
   const text = String(result.errorText || '')
   if (/reached the API rate limit for free users|Token Plan/i.test(text)) return false
+  if (isImageLoadError(result)) return false
   return result.status === 429 || /rate limited|too many requests|1015/i.test(text)
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-/** 带退避重试的 Agnes 调用（仅对限流类错误重试，成功前不额外消耗额度） */
-async function callAgnesWithRetry(apiKey, imageUrl) {
+/** 带退避重试的 Agnes 调用（仅对限流类错误重试） */
+async function callAgnesWithRetry(apiKey, imageRef) {
   const delays = [0, 2000, 6000]
   let result
   for (let i = 0; i < delays.length; i++) {
     if (delays[i]) await sleep(delays[i])
-    result = await callAgnes(apiKey, imageUrl)
+    result = await callAgnes(apiKey, imageRef)
     const failed = !result.ok || result.data?.error
     if (!failed) return result
     if (!isRetryable(result)) return result
@@ -241,9 +258,6 @@ async function handleEvaluate(request, env) {
   const apiKey = env.AGNES_API_KEY
   if (!apiKey) {
     return json({ error: '后端未配置 AGNES_API_KEY（Cloudflare Worker 环境变量）' }, 500)
-  }
-  if (!env.BUCKET) {
-    return json({ error: '后端未配置 R2 存储（缺少 BUCKET 绑定），无法生成图片公开链接' }, 500)
   }
 
   let body
@@ -259,22 +273,32 @@ async function handleEvaluate(request, env) {
   }
 
   try {
-    // Agnes 只接受公网可访问的图片 URL，不支持 base64 / data URL。
-    // 图片存入 R2，但 URL 走 Worker 自己的 /img/<key> 代理——
-    // r2.dev 公开域名被 Cloudflare 限流（Error 1015），实测会让 Agnes 取图失败。
-    const key = await uploadToR2(env, image.raw, image.mime)
-    const imageUrl = buildImageUrl(request, env, key)
-    console.log('图片可访问 URL:', imageUrl)
+    // 主方案：把 base64 直接内联进请求。
+    // Agnes 的图片加载逻辑是「http 开头当 URL 去拉，否则当 base64 解码」，
+    // 而 *.workers.dev / *.r2.dev 在中国大陆 DNS 被污染，由它去拉图必然失败
+    // （表现为 "An exception occurred while loading IMAGE data at index 0"）。
+    const inlineRef = { kind: 'base64', value: image.raw }
+    let used = 'inline-base64'
+    let result = await callAgnesWithRetry(apiKey, inlineRef)
+    let imageUrl = null
 
-    const result = await callAgnesWithRetry(apiKey, imageUrl)
+    // 兜底：内联失败且图片读取类错误 → 退回 R2 + Worker /img 公开 URL 再试一次
+    if ((!result.ok || result.data?.error) && isImageLoadError(result) && env.BUCKET) {
+      console.log('内联 base64 失败，改用 R2 URL 兜底:', cleanErrorText(result.errorText))
+      const key = await uploadToR2(env, image.raw, image.mime)
+      imageUrl = buildImageUrl(request, env, key)
+      used = 'r2-url'
+      result = await callAgnesWithRetry(apiKey, { kind: 'url', value: imageUrl })
+    }
 
     if (!result.ok || result.data?.error) {
-      console.error('Agnes 调用失败:', result.status, cleanErrorText(result.errorText))
+      console.error(`Agnes 调用失败（${used}）:`, result.status, cleanErrorText(result.errorText))
       const friendly = friendlyError(result)
       return json({
         error: friendly.message,
         code: friendly.code,
         upstreamStatus: result.status,
+        transport: used,
         imageUrl
       }, 502)
     }
@@ -312,7 +336,7 @@ async function handleEvaluate(request, env) {
       if (!(k in data) || data[k] === null || data[k] === '') data[k] = v
     }
 
-    return json({ success: true, data })
+    return json({ success: true, data, transport: used })
   } catch (err) {
     console.error('handleEvaluate 异常:', err && err.stack || err)
     return json({ error: err.message || '服务异常' }, 500)
@@ -343,8 +367,7 @@ export default {
       return handleImage(env, decodeURIComponent(url.pathname.slice('/img/'.length)))
     }
 
-    if (url.pathname === '/api/health' || url.pathname === '/health') {
-      return new Response(JSON.stringify({ status: 'ok', model: 'agnes-2.5-flash' }), {
+    if (url.pathname === '/api/health' || url.pathname === '/health') {      return new Response(JSON.stringify({ status: 'ok', model: 'agnes-2.5-flash' }), {
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       })
     }
