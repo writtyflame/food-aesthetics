@@ -140,6 +140,53 @@ python -m http.server 8080
 
 ---
 
+## 图片存储（R2）配置
+
+> **为什么需要 R2**：Agnes 的 `image_url.url` 只接受公网可访问的图片 URL，**不支持 base64 / data URL**。若直接把 base64 发给模型，模型看不到图，会返回非 JSON 文本，导致分数恒为默认值（65 / 佛系干饭派）。因此 Worker 先把图片上传到 Cloudflare R2 公开桶，再把公开 URL 交给模型。
+
+### 1. 控制台配置
+
+1. 打开 [Cloudflare R2](https://dash.cloudflare.com) → **R2 Object Storage** → **Create bucket**，桶名如 `food-images`，Location 选 Automatic
+2. 进入桶 → **Settings** → **Public access** → **Allow Access**，记下生成的公开域名 `https://pub-<hash>.r2.dev`
+3. 复制 **Account ID**（地址栏 `https://dash.cloudflare.com/<account-id>/...`，或 API Tokens 页顶部）
+
+### 2. 配置文件
+
+`backend/wrangler.toml` 需包含：
+
+```toml
+account_id = "<你的 Account ID>"
+workers_dev = true
+
+[vars]
+R2_PUBLIC_URL = "https://pub-<hash>.r2.dev"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "food-images"
+```
+
+`backend/worker.js` 中的 `uploadToR2()` 负责：base64 → 二进制 → `env.BUCKET.put(...)` → 拼公开 URL。无需手动改代码，配置正确即可。
+
+### 3. 部署与验证
+
+```bash
+cd backend
+wrangler deploy          # 部署后 Worker 即挂载 R2 绑定
+```
+
+> ⚠️ 本机直连 Cloudflare auth server 会被墙，报 `auth token has expired`；**走系统代理**即可（`wrangler deploy` 默认读取 `HTTP_PROXY`）。
+
+验证 R2 公开访问是否生效（不消耗 Agnes 额度）：
+
+```bash
+echo "probe" | wrangler r2 object put food-images/test-probe.txt --pipe --remote
+# 浏览器/curl 打开 https://pub-<hash>.r2.dev/test-probe.txt 应返回 probe
+wrangler r2 object delete food-images/test-probe.txt --remote
+```
+
+---
+
 ## 需要注册的服务
 
 | 服务 | 用途 | 费用 | 注册链接 |
