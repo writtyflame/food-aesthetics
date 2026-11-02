@@ -193,10 +193,18 @@ function friendlyError(result) {
       message: '上游 AI 免费额度已用尽，需要升级套餐或稍后重试',
     }
   }
-  if (status === 429 || /1015|rate limited|too many requests|429/i.test(text)) {
+  // Cloudflare Error 1015：Agnes 整站按出口 IP 段拦截 Cloudflare Workers 的请求
+  // （实测 /v1/models、首页均 429/1015，换 UA/域名/请求头都无效），等一会也不会好
+  if (/1015/i.test(text)) {
+    return {
+      code: 'PROVIDER_BLOCKED',
+      message: 'AI 服务商（Agnes）屏蔽了云端函数发起的请求（Cloudflare Error 1015），需更换模型服务商或加一层中转服务',
+    }
+  }
+  if (status === 429 || /rate limited|too many requests|429/i.test(text)) {
     return {
       code: 'UPSTREAM_RATE_LIMITED',
-      message: '上游服务限流（Cloudflare 1015 / HTTP 429），请等待约 1 分钟后重试',
+      message: '上游服务限流（HTTP 429），请等待约 1 分钟后重试',
     }
   }
   return {
@@ -205,11 +213,12 @@ function friendlyError(result) {
   }
 }
 
-/** 是否值得重试（限流类可以，额度用尽/参数错误不行） */
+/** 是否值得重试（限流类可以，额度用尽/被拦截/参数错误不行） */
 function isRetryable(result) {
   const text = String(result.errorText || '')
   if (/reached the API rate limit for free users|Token Plan/i.test(text)) return false
-  return result.status === 429 || /1015|rate limited|too many requests/i.test(text)
+  if (/1015/i.test(text)) return false // 整站拦截出口 IP，重试无意义
+  return result.status === 429 || /rate limited|too many requests/i.test(text)
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -334,7 +343,7 @@ export default {
     if (url.pathname.startsWith('/img/')) {
       return handleImage(env, decodeURIComponent(url.pathname.slice('/img/'.length)))
     }
-    
+
     if (url.pathname === '/api/health' || url.pathname === '/health') {
       return new Response(JSON.stringify({ status: 'ok', model: 'agnes-2.5-flash' }), {
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
