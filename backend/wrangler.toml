@@ -1,4 +1,13 @@
 name = "cantingshi-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+account_id = "200912798f4507bfe6e503f058025ef1"
 workers_dev = true
+
+[vars]
+# R2 公开访问域名（桶开启 Public access 后 Cloudflare 分配的 *.r2.dev）
+R2_PUBLIC_URL = "https://pub-45fd73b0b41343ba8fef221663eb1a8a.r2.dev"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "food-images"

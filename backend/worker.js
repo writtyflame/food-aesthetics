@@ -116,10 +116,28 @@ async function callAgnes(apiKey, imageUrl) {
   }
 }
 
+/**
+ * 把 base64 图片上传到 R2 公开桶，返回公网可访问的 URL。
+ * Agnes 只接受公网图片 URL（不支持 base64 / data URL），所以必须先上传再传 URL。
+ */
+async function uploadToR2(env, b64, mime) {
+  const clean = String(b64).replace(/[^A-Za-z0-9+/=]/g, '')
+  if (!clean) throw new Error('图片 base64 数据为空')
+  const bytes = Uint8Array.from(atob(clean), c => c.charCodeAt(0))
+  const ext = mime === 'image/png' ? 'png' : 'jpg'
+  const key = `eval/${crypto.randomUUID()}.${ext}`
+  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: mime } })
+  const base = String(env.R2_PUBLIC_URL).replace(/\/+$/, '')
+  return `${base}/${key}`
+}
+
 async function handleEvaluate(request, env) {
   const apiKey = env.AGNES_API_KEY
   if (!apiKey) {
     return json({ error: '后端未配置 AGNES_API_KEY（Cloudflare Worker 环境变量）' }, 500)
+  }
+  if (!env.BUCKET || !env.R2_PUBLIC_URL) {
+    return json({ error: '后端未配置 R2 存储（BUCKET 绑定 / R2_PUBLIC_URL），无法生成图片公开链接' }, 500)
   }
 
   let body
@@ -135,16 +153,12 @@ async function handleEvaluate(request, env) {
   }
 
   try {
-    // 优先用标准 data URL；若上游报 base64 相关错误，回退为纯 base64 再试一次
-    // （上游网关对是否带 data: 前缀的处理不一致，报错文案为 "Non-base64 digit found"）
-    let result = await callAgnes(apiKey, image.dataUrl)
-    if (!result.ok || result.data?.error) {
-      const msg = String(result.errorText || '')
-      if (/base64|image_url|invalid.*image|decode/i.test(msg)) {
-        console.error('data URL 调用失败，回退纯 base64：', msg)
-        result = await callAgnes(apiKey, image.raw)
-      }
-    }
+    // Agnes 只接受公网可访问的图片 URL，不支持 base64 / data URL。
+    // 先把图片上传到 R2 公开桶，用返回的公开 URL 喂给模型。
+    const imageUrl = await uploadToR2(env, image.raw, image.mime)
+    console.log('图片已上传 R2:', imageUrl)
+
+    const result = await callAgnes(apiKey, imageUrl)
 
     if (!result.ok || result.data?.error) {
       console.error('Agnes 调用失败:', result.status, result.errorText)
