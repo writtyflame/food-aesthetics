@@ -271,170 +271,15 @@ $('share-modal').addEventListener('click', e => {
   if (e.target === $('share-modal')) $('share-modal').classList.remove('show');
 });
 
-function generateSharePoster() {
-  const canvas = $('share-canvas');
-  const ctx = canvas.getContext('2d');
-  const W = 750, H = 1334;
-  canvas.width = W;
-  canvas.height = H;
-  
-  const data = currentResult;
-  const score = data.overall_score || 65;
-  
-  // 背景渐变
-  const grad = ctx.createLinearGradient(0, 0, W, H);
-  grad.addColorStop(0, '#faf6f1');
-  grad.addColorStop(1, '#fde8d0');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H);
-  
-  // 顶部装饰弧
-  ctx.fillStyle = '#c0621a';
-  ctx.beginPath();
-  ctx.arc(W/2, -100, 300, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // 照片区域
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-  img.onload = () => {
-    // 圆角矩形裁切照片
-    roundRect(ctx, 37.5, 80, W - 75, 360, 20);
-    ctx.fillStyle = '#ddd';
-    ctx.fill();
-    ctx.clip();
-    // 等比缩放填充
-    const scale = Math.max((W - 75) / img.width, 360 / img.height);
-    const sw = img.width * scale, sh = img.height * scale;
-    ctx.drawImage(img, (W - 75 - sw) / 2, 80 + (360 - sh) / 2, sw, sh);
-    ctx.restore();
-    
-    // 边框
-    roundRect(ctx, 37.5, 80, W - 75, 360, 20);
-    ctx.strokeStyle = 'rgba(192,98,26,0.2)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    
-    drawPosterContent(ctx, W, H, data, score);
-    var shareImg = document.getElementById("share-img");
-    if (shareImg) shareImg.src = canvas.toDataURL("image/png");
-  };
-  img.crossOrigin = "anonymous";
-  img.onerror = function() {
-    drawPosterContent(ctx, W, H, data, score);
-    var shareImg = document.getElementById("share-img");
-    if (shareImg) shareImg.src = canvas.toDataURL("image/png");
-  };
-  img.src = currentImageBase64;
-}
-
-function drawPosterContent(ctx, W, H, data, score) {
-  const personaEmoji = getPersonaEmoji(data.persona_label);
-  const cx = W / 2;
-  
-  // 大评分
-  ctx.fillStyle = '#c0621a';
-  ctx.font = 'bold 120px "Noto Serif SC", serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(score, cx, 540);
-  
-  ctx.fillStyle = '#7a5c4f';
-  ctx.font = '24px "Noto Sans SC", sans-serif';
-  ctx.fillText('综合评分', cx, 610);
-  
-  // 人格标签
-  ctx.fillStyle = '#c0621a';
-  ctx.font = 'bold 36px "Noto Serif SC", serif';
-  ctx.fillText(personaEmoji + '  ' + (data.persona_label || '餐评师认证'), cx, 690);
-  
-  // 描述
-  ctx.fillStyle = '#7a5c4f';
-  ctx.font = '22px "Noto Sans SC", sans-serif';
-  wrapText(ctx, data.persona_desc || '好好吃饭，认真生活', cx, 740, W - 100, 32);
-  
-  // 维度条
-  const dims = [
-    { name: '色彩和谐度', key: 'color', emoji: '🎨' },
-    { name: '构图美感', key: 'composition', emoji: '📐' },
-    { name: '质感对比', key: 'texture', emoji: '✨' },
-    { name: '食欲指数', key: 'appetite', emoji: '🔥' },
-    { name: '餐桌故事', key: 'story_score', emoji: '📖' }
-  ];
-  
-  let yPos = 830;
-  dims.forEach(dim => {
-    const rawScore = Number(data[dim.key]);
-    const safeScore = Number.isFinite(rawScore) ? rawScore : 6;
-    const val = Math.round(safeScore / 10 * 100).toString();
-    ctx.fillStyle = '#2c1810';
-    ctx.font = '22px "Noto Sans SC", sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(dim.emoji + ' ' + dim.name, 50, yPos);
-    
-    // 进度条背景
-    ctx.fillStyle = '#e8ddd0';
-    roundRect(ctx, 240, yPos - 14, W - 300, 12, 6);
-    ctx.fill();
-    
-    // 进度条填充
-    ctx.fillStyle = '#c0621a';
-    roundRect(ctx, 240, yPos - 14, (W - 300) * parseInt(val) / 100, 12, 6);
-    ctx.fill();
-    
-    ctx.fillStyle = '#c0621a';
-    ctx.font = 'bold 20px "Noto Sans SC", sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(val + '%', W - 50, yPos);
-    
-    yPos += 44;
+// ===== 分享海报 =====
+async function generateSharePoster() {
+  const data = currentResult || {};
+  const url = await renderPoster($('share-canvas'), {
+    data,
+    imageSrc: currentImageBase64,
+    emoji: getPersonaEmoji(data.persona_label)
   });
-  
-  // 故事文字
-  yPos += 16;
-  ctx.fillStyle = '#7a5c4f';
-  ctx.font = 'italic 20px "Noto Serif SC", serif';
-  ctx.textAlign = 'center';
-  wrapText(ctx, '"' + (data.story || '这是一道有故事的美食') + '"', cx, yPos, W - 80, 30);
-  
-  // 底部品牌
-  yPos = H - 80;
-  ctx.fillStyle = '#a08070';
-  ctx.font = '18px "Noto Sans SC", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('AI食物美学评测 · 餐评师', cx, yPos);
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-}
-
-function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-  const chars = text.split('');
-  let line = '';
-  let ly = y;
-  for (let c of chars) {
-    const testLine = line + c;
-    const metrics = ctx.measureText(testLine);
-    if (metrics.width > maxWidth && line !== '') {
-      ctx.fillText(line, x, ly);
-      line = c;
-      ly += lineHeight;
-    } else {
-      line = testLine;
-    }
-  }
-  ctx.fillText(line, x, ly);
+  $('share-img').src = url;
 }
 
 // ===== 复制分享文案 =====
@@ -450,7 +295,7 @@ $('copy-btn').addEventListener('click', () => {
 
   const done = () => {
     $('copy-btn').textContent = '✅ 已复制';
-    setTimeout(() => { $('copy-btn').textContent = '复制文字'; }, 2000);
+    setTimeout(() => { $('copy-btn').textContent = '复制文案'; }, 2000);
   };
 
   navigator.clipboard.writeText(text).then(done).catch(() => {

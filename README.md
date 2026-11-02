@@ -243,7 +243,8 @@ cepingwebsite/
 │   ├── css/
 │   │   └── style.css     # 全部样式（暖色调美食风）
 │   └── js/
-│       └── app.js        # 前端逻辑（上传/调用API/渲染/分享）
+│       ├── app.js        # 前端逻辑（上传/调用API/渲染）
+│       └── poster.js     # 分享海报绘制（纯 canvas，750×1280）
 ├── backend/
 │   ├── worker.js         # Cloudflare Worker 主程序（Agnes AI）
 │   ├── local-server.mjs  # 本地开发适配服务（Node 直接跑 worker.js，规避 Windows wrangler dev 问题）

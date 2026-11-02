@@ -506,13 +506,16 @@ body {
 }
 .share-modal.show { display: flex; }
 .share-modal-inner {
-  background: var(--bg-card);
-  border-radius: var(--radius);
-  padding: 28px;
-  max-width: 360px;
+  background: linear-gradient(180deg, #FFFDFA 0%, #FBF3EA 100%);
+  border-radius: 22px;
+  padding: 18px 18px 22px;
+  max-width: 380px;
+  max-height: 92vh;
+  overflow-y: auto;
   width: 100%;
   text-align: center;
   position: relative;
+  box-shadow: 0 24px 64px rgba(44,24,16,0.28);
   animation: modalIn 0.3s ease;
 }
 @keyframes modalIn {
@@ -521,34 +524,57 @@ body {
 }
 .share-close {
   position: absolute;
-  top: 12px; right: 16px;
-  font-size: 28px;
+  top: 14px; right: 14px;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px;
   color: var(--text-light);
+  background: rgba(255,255,255,0.9);
+  border-radius: 50%;
   cursor: pointer;
   line-height: 1;
+  z-index: 2;
+  box-shadow: 0 2px 8px rgba(44,24,16,0.08);
+  transition: var(--transition);
 }
+.share-close:hover { color: var(--primary); transform: rotate(90deg); }
 .share-modal-inner h3 {
-  font-size: 18px;
-  margin-bottom: 16px;
+  font-size: 17px;
+  letter-spacing: 1px;
+  margin: 4px 0 14px;
   font-family: "Noto Serif SC", serif;
+  color: var(--text);
+}
+#share-img {
+  display: block;
+  width: 100%;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(120,70,30,0.18);
+  cursor: pointer;
+  background: #FBF1E4;
 }
 .share-hint {
   font-size: 12px;
   color: var(--text-light);
-  margin: 12px 0;
+  margin: 14px 0 0;
+  letter-spacing: 0.5px;
 }
 .btn-copy {
-  margin-top: 16px;
-  padding: 10px 24px;
-  background: var(--primary-light);
-  color: var(--primary-dark);
+  margin-top: 12px;
+  width: 100%;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+  color: #fff;
   border: none;
-  border-radius: 20px;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: 50px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
   cursor: pointer;
+  box-shadow: 0 6px 18px rgba(192,98,26,0.28);
+  transition: var(--transition);
 }
-.btn-copy:hover { background: #f0d4a8; }
+.btn-copy:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(192,98,26,0.36); }
 
 /* SVG gradient（隐藏） */
 .svg-defs { position: absolute; width: 0; height: 0; }
