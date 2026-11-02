@@ -5,8 +5,11 @@ account_id = "200912798f4507bfe6e503f058025ef1"
 workers_dev = true
 
 [vars]
-# R2 公开访问域名（桶开启 Public access 后 Cloudflare 分配的 *.r2.dev）
+# 图片默认由 Worker 自身 /img/<key> 代理（不受 r2.dev 限流影响，Error 1015）。
+# 下面这个 r2.dev 域名仅作兜底：设 USE_R2_PUBLIC="1" 才会改用它。
 R2_PUBLIC_URL = "https://pub-45fd73b0b41343ba8fef221663eb1a8a.r2.dev"
+# 可选：显式指定图片域名（如后续绑了自定义域）
+# IMAGE_BASE_URL = "https://img.example.com"
 
 [[r2_buckets]]
 binding = "BUCKET"

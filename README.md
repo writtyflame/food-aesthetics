@@ -142,13 +142,15 @@ python -m http.server 8080
 
 ## 图片存储（R2）配置
 
-> **为什么需要 R2**：Agnes 的 `image_url.url` 只接受公网可访问的图片 URL，**不支持 base64 / data URL**。若直接把 base64 发给模型，模型看不到图，会返回非 JSON 文本，导致分数恒为默认值（65 / 佛系干饭派）。因此 Worker 先把图片上传到 Cloudflare R2 公开桶，再把公开 URL 交给模型。
+> **为什么需要 R2**：Agnes 的 `image_url.url` 只接受公网可访问的图片 URL，**不支持 base64 / data URL**。若直接把 base64 发给模型，模型看不到图，会返回非 JSON 文本，导致分数恒为默认值（65 / 佛系干饭派）。因此 Worker 先把图片上传到 Cloudflare R2，再把图片 URL 交给模型。
+>
+> **为什么图片 URL 走 Worker 而不是 r2.dev**：Cloudflare 官方文档明确 `r2.dev` 公开域名**有限流，仅供开发测试**。实测 Agnes 服务端拉 `pub-*.r2.dev/...` 会被限流，返回 `error code: 1015`（Cloudflare 限流，HTTP 429）。所以现在图片 URL 用 Worker 自身的 `/img/<key>` 路由（从 R2 绑定直读并流式返回），同域、无限流问题。`R2_PUBLIC_URL` 仅作兜底（`USE_R2_PUBLIC=1` 才启用）。
 
 ### 1. 控制台配置
 
 1. 打开 [Cloudflare R2](https://dash.cloudflare.com) → **R2 Object Storage** → **Create bucket**，桶名如 `food-images`，Location 选 Automatic
-2. 进入桶 → **Settings** → **Public access** → **Allow Access**，记下生成的公开域名 `https://pub-<hash>.r2.dev`
-3. 复制 **Account ID**（地址栏 `https://dash.cloudflare.com/<account-id>/...`，或 API Tokens 页顶部）
+2. 复制 **Account ID**（地址栏 `https://dash.cloudflare.com/<account-id>/...`，或 API Tokens 页顶部）
+3. *（可选）* 进入桶 → **Settings** → **Public access** → **Allow Access** 拿 `https://pub-<hash>.r2.dev`，仅在需要 `USE_R2_PUBLIC=1` 兜底时使用
 
 ### 2. 配置文件
 
@@ -159,6 +161,7 @@ account_id = "<你的 Account ID>"
 workers_dev = true
 
 [vars]
+# 兜底用，默认不生效（图片走 Worker /img/ 代理）
 R2_PUBLIC_URL = "https://pub-<hash>.r2.dev"
 
 [[r2_buckets]]
@@ -166,7 +169,7 @@ binding = "BUCKET"
 bucket_name = "food-images"
 ```
 
-`backend/worker.js` 中的 `uploadToR2()` 负责：base64 → 二进制 → `env.BUCKET.put(...)` → 拼公开 URL。无需手动改代码，配置正确即可。
+`backend/worker.js` 里的链路：`uploadToR2()`（base64 → 二进制 → `env.BUCKET.put`，返回 key）→ `buildImageUrl()`（拼 `<Worker 域名>/img/<key>`）→ 交给 Agnes。`GET /img/<key>` 由 `handleImage()` 从 R2 直读返回。
 
 ### 3. 部署与验证
 
@@ -177,12 +180,13 @@ wrangler deploy          # 部署后 Worker 即挂载 R2 绑定
 
 > ⚠️ 本机直连 Cloudflare auth server 会被墙，报 `auth token has expired`；**走系统代理**即可（`wrangler deploy` 默认读取 `HTTP_PROXY`）。
 
-验证 R2 公开访问是否生效（不消耗 Agnes 额度）：
+验证图片代理链路（不消耗 Agnes 额度）：
 
 ```bash
-echo "probe" | wrangler r2 object put food-images/test-probe.txt --pipe --remote
-# 浏览器/curl 打开 https://pub-<hash>.r2.dev/test-probe.txt 应返回 probe
-wrangler r2 object delete food-images/test-probe.txt --remote
+# 上传探针对象（--content 在新版 wrangler 不支持，用 --file 或 --pipe）
+wrangler r2 object put food-images/eval/probe.png --file=probe.png --remote
+# 打开 https://<worker 域名>/img/eval/probe.png，应直接返回图片（Content-Type: image/png）
+wrangler r2 object delete food-images/eval/probe.png --remote
 ```
 
 ---

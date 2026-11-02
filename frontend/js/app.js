@@ -178,11 +178,17 @@ $('analyze-btn').addEventListener('click', async () => {
   } catch (err) {
     stopLoading();
     const msg = err && err.message ? err.message : '未知错误';
+    const isRateLimited = /1015|429|限流|rate limit/i.test(msg);
     const isNetwork = /Failed to fetch|NetworkError|Load failed/i.test(msg);
-    alert('评测失败：' + msg + '\n\n' +
-      (isNetwork
-        ? '请检查网络或后端服务是否正常。'
-        : '若反复出现，请检查后端 AI Key 配置与账户额度（限流/额度用尽会返回 429）。'));
+    let hint;
+    if (isRateLimited) {
+      hint = '这是上游 AI 服务的限流（Cloudflare 1015 / HTTP 429），不是你的操作问题。等约 1 分钟再试即可。';
+    } else if (isNetwork) {
+      hint = '请检查网络或后端服务是否正常。';
+    } else {
+      hint = '若反复出现，请检查后端 AI Key 配置与账户额度。';
+    }
+    alert('评测失败：' + msg + '\n\n' + hint);
     showPage('page-upload');
   }
 });

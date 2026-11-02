@@ -4,6 +4,11 @@
  * 
  * 部署方式：wrangler.toml + wrangler deploy
  * 环境变量：AGNES_API_KEY（在 Cloudflare 控制台添加）
+ * 
+ * 路由：
+ *   POST /evaluate | /api/evaluate   评测（图片存 R2 → 用 /img/<key> 公开 URL 喂 Agnes）
+ *   GET  /img/<key>                  从 R2 直读图片（替代 r2.dev，规避 Cloudflare 1015 限流）
+ *   GET  /health | /api/health       健康检查
  */
 
 const EVALUATION_PROMPT = `你是一位专业的美食美学分析师，擅长从视觉角度评价菜品的摆盘美学。
@@ -117,8 +122,7 @@ async function callAgnes(apiKey, imageUrl) {
 }
 
 /**
- * 把 base64 图片上传到 R2 公开桶，返回公网可访问的 URL。
- * Agnes 只接受公网图片 URL（不支持 base64 / data URL），所以必须先上传再传 URL。
+ * 把 base64 图片上传到 R2 桶，返回对象 key（不是 URL）。
  */
 async function uploadToR2(env, b64, mime) {
   const clean = String(b64).replace(/[^A-Za-z0-9+/=]/g, '')
@@ -127,8 +131,102 @@ async function uploadToR2(env, b64, mime) {
   const ext = mime === 'image/png' ? 'png' : 'jpg'
   const key = `eval/${crypto.randomUUID()}.${ext}`
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: mime } })
-  const base = String(env.R2_PUBLIC_URL).replace(/\/+$/, '')
-  return `${base}/${key}`
+  return key
+}
+
+/**
+ * 构造给 Agnes 拉取的图片 URL。
+ * 默认走 Worker 自己的 /img/<key> 代理（同域、无限流），
+ * 而不是 r2.dev 公开域名——r2.dev 被 Cloudflare 限流（Error 1015），仅供开发测试。
+ * 如需改回 r2.dev：设置环境变量 IMAGE_BASE_URL=R2（或直接给 R2_PUBLIC_URL 并在 USE_R2_PUBLIC=1 时启用）。
+ */
+function buildImageUrl(request, env, key) {
+  if (env.IMAGE_BASE_URL && env.IMAGE_BASE_URL !== 'R2') {
+    return `${String(env.IMAGE_BASE_URL).replace(/\/+$/, '')}/img/${key}`
+  }
+  if (env.IMAGE_BASE_URL === 'R2' || env.USE_R2_PUBLIC === '1') {
+    return `${String(env.R2_PUBLIC_URL).replace(/\/+$/, '')}/${key}`
+  }
+  return `${new URL(request.url).origin}/img/${key}`
+}
+
+/** 用 Worker 代理 R2 对象，规避 r2.dev 的 1015 限流 */
+async function handleImage(env, key) {
+  if (!env.BUCKET) return new Response('Not Found', { status: 404 })
+  if (!/^eval\/[A-Za-z0-9._-]+$/.test(key)) {
+    return new Response('Bad Request', { status: 400 })
+  }
+  const obj = await env.BUCKET.get(key)
+  if (!obj) return new Response('Not Found', { status: 404 })
+
+  const headers = new Headers()
+  obj.writeHttpMetadata(headers)
+  headers.set('etag', obj.httpEtag)
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+  headers.set('Access-Control-Allow-Origin', '*')
+  return new Response(obj.body, { headers })
+}
+
+/**
+ * 把上游错误文本清洗成可读的一句（Cloudflare 错误页是 HTML，直接透传会是一堆标签）
+ */
+function cleanErrorText(raw) {
+  return String(raw || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200)
+}
+
+/**
+ * 给前端的友好错误文案
+ * 1015 = Cloudflare 限流（HTTP 429）；Agnes 免费额度用尽是另一类
+ */
+function friendlyError(result) {
+  const text = String(result.errorText || '')
+  const status = result.status || 0
+  if (/reached the API rate limit for free users|Token Plan/i.test(text)) {
+    return {
+      code: 'AGNES_QUOTA',
+      message: '上游 AI 免费额度已用尽，需要升级套餐或稍后重试',
+    }
+  }
+  if (status === 429 || /1015|rate limited|too many requests|429/i.test(text)) {
+    return {
+      code: 'UPSTREAM_RATE_LIMITED',
+      message: '上游服务限流（Cloudflare 1015 / HTTP 429），请等待约 1 分钟后重试',
+    }
+  }
+  return {
+    code: 'UPSTREAM_ERROR',
+    message: cleanErrorText(text) || `上游接口返回 HTTP ${status}`,
+  }
+}
+
+/** 是否值得重试（限流类可以，额度用尽/参数错误不行） */
+function isRetryable(result) {
+  const text = String(result.errorText || '')
+  if (/reached the API rate limit for free users|Token Plan/i.test(text)) return false
+  return result.status === 429 || /1015|rate limited|too many requests/i.test(text)
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+/** 带退避重试的 Agnes 调用（仅对限流类错误重试，不额外消耗额度） */
+async function callAgnesWithRetry(apiKey, imageUrl) {
+  const delays = [0, 1200, 3000]
+  let result
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]) await sleep(delays[i])
+    result = await callAgnes(apiKey, imageUrl)
+    const failed = !result.ok || result.data?.error
+    if (!failed) return result
+    if (!isRetryable(result)) return result
+    console.warn(`Agnes 限流，第 ${i + 1} 次重试前等待 ${delays[i + 1] || 0}ms，状态 ${result.status}`)
+  }
+  return result
 }
 
 async function handleEvaluate(request, env) {
@@ -136,8 +234,8 @@ async function handleEvaluate(request, env) {
   if (!apiKey) {
     return json({ error: '后端未配置 AGNES_API_KEY（Cloudflare Worker 环境变量）' }, 500)
   }
-  if (!env.BUCKET || !env.R2_PUBLIC_URL) {
-    return json({ error: '后端未配置 R2 存储（BUCKET 绑定 / R2_PUBLIC_URL），无法生成图片公开链接' }, 500)
+  if (!env.BUCKET) {
+    return json({ error: '后端未配置 R2 存储（缺少 BUCKET 绑定），无法生成图片公开链接' }, 500)
   }
 
   let body
@@ -154,15 +252,23 @@ async function handleEvaluate(request, env) {
 
   try {
     // Agnes 只接受公网可访问的图片 URL，不支持 base64 / data URL。
-    // 先把图片上传到 R2 公开桶，用返回的公开 URL 喂给模型。
-    const imageUrl = await uploadToR2(env, image.raw, image.mime)
-    console.log('图片已上传 R2:', imageUrl)
+    // 图片存入 R2，但 URL 走 Worker 自己的 /img/<key> 代理——
+    // r2.dev 公开域名被 Cloudflare 限流（Error 1015），实测会让 Agnes 取图失败。
+    const key = await uploadToR2(env, image.raw, image.mime)
+    const imageUrl = buildImageUrl(request, env, key)
+    console.log('图片可访问 URL:', imageUrl)
 
-    const result = await callAgnes(apiKey, imageUrl)
+    const result = await callAgnesWithRetry(apiKey, imageUrl)
 
     if (!result.ok || result.data?.error) {
-      console.error('Agnes 调用失败:', result.status, result.errorText)
-      return json({ error: result.errorText || `上游接口返回 HTTP ${result.status}`, status: result.status }, 502)
+      console.error('Agnes 调用失败:', result.status, cleanErrorText(result.errorText))
+      const friendly = friendlyError(result)
+      return json({
+        error: friendly.message,
+        code: friendly.code,
+        upstreamStatus: result.status,
+        imageUrl
+      }, 502)
     }
 
     const content = result.data?.choices?.[0]?.message?.content || ''
@@ -222,6 +328,11 @@ export default {
     
     if ((url.pathname === '/api/evaluate' || url.pathname === '/evaluate') && request.method === 'POST') {
       return handleEvaluate(request, env)
+    }
+
+    // 图片代理：Agnes 从这里拉图（同域，不受 r2.dev 的 1015 限流影响）
+    if (url.pathname.startsWith('/img/')) {
+      return handleImage(env, decodeURIComponent(url.pathname.slice('/img/'.length)))
     }
     
     if (url.pathname === '/api/health' || url.pathname === '/health') {
